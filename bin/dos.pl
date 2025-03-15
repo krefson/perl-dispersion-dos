@@ -74,7 +74,7 @@ my $castep_re;
 my ($grflag, $gpflag, $plotflag, $datflag,  $irflag, $ramanflag, $psflag, $qlabels, $exptfile, $exptq, $abscissa,$verbose) = ("", "", "","","","","","","");
 my ($title, $fileroot, $units, $xlabel, $ylabel, $fermi_u, $fermi_d, $i,$freq,$exptn, $wt, $b, $c, $temperature, $lorentzian, $zpe, $nqlast,$spin_polarised);
 
-my (@freqs, @freqs_d, @qpts, @weights, @dos, @dos_u, @dos_d, @ir_intensities, @r_intensities, @headers, $base);
+my (@freqs, @freqs_d, @qpts, @weights, @dos, @dos_u, @dos_d, @ir_intensities, @r_intensities, @headers, $base, $base_d);
 
 my ($opt_xg, $opt_gp, $opt_np, $opt_ps, $opt_eps, $opt_bs, $opt_mirror, $opt_bw,$opt_ir, $opt_raman, $opt_temp, $opt_lorentz,  $opt_dat, $opt_expt, $opt_gwidth,$opt_units, $opt_help,$opt_v,$opt_z) = (0,0,0,0,0,0,0,"",0,0,0,0);
 my ($is_dot_castep);
@@ -265,16 +265,23 @@ if ( $readdos ) {
 
     $spin_polarised = $#{$freqs_d[0]} > 0;
 
-    $base = 1.0e21;
+    $base   = find_lowest_e(\@freqs);
     if( $irflag ) {
-	compute_dos(\@freqs, \@weights, \@dos_u, $bwidth, $gwidth, \$base, \@ir_intensities);
+	compute_dos(\@freqs, \@weights, \@dos_u, $bwidth, $gwidth, $base, \@ir_intensities);
     } elsif( $ramanflag ) {
-	compute_raman(\@freqs, \@weights, \@dos_u, $bwidth, $gwidth, \$base, \@r_intensities);
+	compute_raman(\@freqs, \@weights, \@dos_u, $bwidth, $gwidth, $base, \@r_intensities);
     } else {
 	$zpe = compute_zpe(\@freqs, \@weights);
 	printf STDERR "Zero Point Energy = %12.6f eV\n", $zpe if $opt_z;
-	compute_dos(\@freqs, \@weights, \@dos_u, $bwidth, $gwidth, \$base);
-	compute_dos(\@freqs_d, \@weights, \@dos_d, $bwidth, $gwidth, \$base) if ($opt_bs && $spin_polarised) ;
+	if ( $opt_bs && $spin_polarised ) {
+	    $base_d = find_lowest_e(\@freqs_d);
+	    # Use lowest frequency of either spin channel as base for DOS.
+	    $base = $base_d if( $base_d < $base );
+	    compute_dos(\@freqs_d, \@weights, \@dos_d, $bwidth, $gwidth, $base);
+	    compute_dos(\@freqs,   \@weights, \@dos_u, $bwidth, $gwidth, $base);
+	} else {
+	    compute_dos(\@freqs, \@weights, \@dos_u, $bwidth, $gwidth, $base);
+	}
     }
     
     @dos = (\@dos_u, \@dos_d);
@@ -676,7 +683,6 @@ sub read_dot_bands {
       $$weights[$nk] = $wt_list[$ink];
     }
   }
-  print STDERR "Spin_polarised=",$spin_polarised,"\n";
   #
   # Due to a CASTEP bug some state may be double-labelled. In that case we have a "spare" set
   # of frequencies in $ink_save.  See if we can guess where to put it.
@@ -960,29 +966,36 @@ sub compute_zpe {
   $zpe;
 }
 
-sub compute_dos {
-  my ($freqs, $weights, $dos, $bwidth, $gwidth, $baseptr, $intensities) = @_;
+sub find_lowest_e {
+  my ($freqs) = @_;
 
-  my ($nq, $q, $mode, $freq, $bin, $base, $g,$h, $ngauss, $nlorentz, $intensity,$gammaby2,$sigma);
+  my ($nq, $mode, $freq, $base);
+
+  $base = 1.0e21;
+
+  for $nq (0..$#{$freqs}) {
+      for $mode (0..$#{$$freqs[$nq]}) {
+	  $freq = ${$freqs}[$nq][$mode];
+	  $base = $freq if $freq < $base;
+      }
+  }
+  $base;
+}
+
+sub compute_dos {
+  my ($freqs, $weights, $dos, $bwidth, $gwidth, $base, $intensities) = @_;
+
+  my ($nq, $q, $mode, $freq, $bin, $g,$h, $ngauss, $nlorentz, $intensity,$gammaby2,$sigma);
   my ( $gauss, $lorentz, $h0, $h1);
   my (@hist);
 
-  if ( $$baseptr > 1.0e20 ) {
-    $base = $$baseptr;
-
-    for $nq (0..$#{$freqs}) {
-      for $mode (0..$#{$$freqs[$nq]}) {
-	$freq = ${$freqs}[$nq][$mode];
-	$base = $freq if $freq < $base;
-      }
-    }
-    $$baseptr = $base;
-  } else {
-    $base = $$baseptr;
-  }
   for $nq (0..$#{$freqs}) {
     for $mode (0..$#{$$freqs[$nq]}) {
       $freq = ${$freqs}[$nq]->[$mode];
+      if( $freq < $base ) {
+	  printf STDERR "ERROR: Frequency %f < lower limit %f\n", $freq, $base;
+	  $freq = $base;
+      }
       $bin = ($freq-$base)/$bwidth;
       $intensity = 1.0;
       $intensity = 0.0 if abs($freq) < $fzerotol;
@@ -1041,7 +1054,7 @@ sub compute_dos {
 }
 
 sub compute_raman {
-  my ($freqs, $weights, $dos, $bwidth, $gwidth, $baseptr, $intensities) = @_;
+  my ($freqs, $weights, $dos, $bwidth, $gwidth, $base, $intensities) = @_;
 
   my $c = 299792458;
   my $laser_wavelength = 514.5e-9; # Ar at 514.5 nm
@@ -1067,6 +1080,6 @@ sub compute_raman {
     push @cross_secs, $cross_section;
 #    print STDERR "f=$freq;  occ=$bose_occ; act=$$intensities[0][$mode]; ds/dO= $cross_section\n";
   }
-  compute_dos($freqs, $weights, $dos, $bwidth, $gwidth, $baseptr, [[@cross_secs]]);
+  compute_dos($freqs, $weights, $dos, $bwidth, $gwidth, $base, [[@cross_secs]]);
   
 }
